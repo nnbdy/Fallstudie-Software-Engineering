@@ -70,4 +70,23 @@ def extract_tire_type(value):
     
     return np.nan
 
+def prepare_data(raw_df):
+    df = clean_columns(raw_df)
+
+    required_cols = [
+        "event",
+        "track",
+        "session",
+        "driver",
+        "tire_entry",
+        "position",
+        "ambient_temp",
+        "track_temp",
+        "cold_temp",
+        "cold_pressure",
+        "cold_pressure_corr",
+        "blled_boost",
+        "hot_pressure",
+        "comment",
+    ]
 
