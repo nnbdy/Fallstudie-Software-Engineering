@@ -21,6 +21,14 @@ FEATURES = [
     "position",
 ]
 
+VALID_TIRE_TYPES = ["DM", "DH", "WUS"]
+
+TIRE_LABELS = {
+    "DM": "DM - Medium",
+    "DH": "DH - Hard",
+    "WUS": "WUS - Regen",
+}
+
 st.set_page_config(
     page_title="Tire Pressure AI",
     layout="wide"
@@ -29,6 +37,7 @@ st.set_page_config(
 st.title("Tire Pressure AI")
 st.caption( "Vorhersage des Druckaufbaus. Ausgabe des Einstelldrucks immer als Referenzwert bei 10 °C.")
 
+## Data preparation
 
 def clean_columns(df):
     df = df.copy()
@@ -85,8 +94,105 @@ def prepare_data(raw_df):
         "cold_temp",
         "cold_pressure",
         "cold_pressure_corr",
-        "blled_boost",
+        "bleed_boost",
         "hot_pressure",
         "comment",
     ]
 
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    numeric_cols = [
+        "ambient_temp",
+        "track_temp",
+        "cold_temp",
+        "cold_pressure",
+        "cold_pressure_corr",
+        "bleed_boost",
+        "hot_pressure",
+    ]
+
+    for col in numeric_cols:
+        df[col] = to_number(df[col])
+
+    df["bleed_boost"] = df["bleed_boost"].fillna(0.0)
+
+    df["tire_type"] = df["tire_type"].fillna(
+        df("tire_entry").apply(extract_tire_type)
+    ) 
+
+    df["tire_type"] = df["tire_type"].astype(str).str.upper().str.strip()
+    df["track"] = df["track"].astype(str).str.strip()
+    df["position"] = df["position"].astype(str).str.strip()
+    df["driver"] = df["driver"].astype(str).str.strip()
+    df["comment"] = df["comment"].astype(str).str.strip()
+
+    # Falls Streckentemperatur fehlt, vorübergehend Außentemperatur nutzen.
+    df["track_temp"] = df["track_temp"].fillna(df["ambient_temp"])
+
+    #Kaltdruck immer auf 10C normieren
+    missing_corr = (
+        df["cold_pressure_corr"].isna()
+        & df["cold_pressure"].notna()
+        & df["cold_temp"].notna()
+    )
+
+    df.loc[missing_corr, "cold_pressure_corr"] = (
+        (df.loc[missing_corr, "cold_pressure_corr"] + 1) 
+        * (
+            (REFERENCE_TEMP_C + 273.15)
+             / (df.loc[missing_corr, "cold_temp"] + 273.15)
+             )
+             - 1
+    )
+
+# Druckaufbau wird ohne Zieldruck berechnet
+
+    df["pressure_build"] = (
+        df["hot_pressure"]
+        - (df["cold_pressure_corr"] + df["bleed_boost"])
+    )
+
+    valid = (
+        df["ambient_temp"].notna()
+        & df["track_temp"].notna()
+        & df["cold_pressure_corr"].notna()
+        & df["hot_pressure"].notna()
+        & df["pressure_build"].notna()
+        & df["tire_type"].isin(VALID_TIRE_TYPES)
+        & df["track"].ne("")
+        & df["track"].ne("nan") 
+        & df["position"].ne("")
+        & df["position"].ne("nan")         
+        )
+    
+    df = df.loc[valid].copy()
+
+# Grobe Plausibilitätsgrenzen für Druckaufbau.
+
+    df = df[
+        (df["pressure_build"] > -0.20)
+        & (df["pressure_build"] < 1.50)
+    ].copy()
+
+# Sonderfälle optional ausschließen
+    bad_keywords = [
+        "crash",
+        "schaden",
+        "damage",
+        "defekt",
+        "puncture",
+        "platte",
+    ]
+
+    bad_mask = df["comment"].str.lower().apply(
+        lambda x: any(word in x for word in bad_keywords)
+    )
+
+    df["excluded_by_comment"] = bad_mask
+    df = df[~bad_mask].copy()
+
+    return df
+
+## Model training
