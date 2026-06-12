@@ -31,6 +31,14 @@ TIRE_LABELS = {
     "WUS": "WUS - Regen",
 }
 
+CAR_MODELS = [
+    "BMW",
+    "Supra",
+    "Porsche",
+]
+
+PORSCHE_REAR_OFFSET = -0.05
+
 st.set_page_config(
     page_title="Tire Pressure AI",
     layout="wide"
@@ -324,8 +332,9 @@ def build_recommendation(
     tire_type: str,
     driver: str,
     target_pressure: float,
+    car_model: str,
 ) -> pd.DataFrame:
-    results = []
+    raw_results = []
 
     positions = sorted(df["position"].dropna().unique())        
 
@@ -359,7 +368,7 @@ def build_recommendation(
 
         # Hier wird der Zieldruck eingerechnet
         # Ausgabe immer bei 10C
-        cold_pressure_10C = target_pressure - final_build
+        cold_pressure_10C_raw = target_pressure - final_build
 
         similar_data = df[
             (df["track"] == track)
@@ -369,24 +378,90 @@ def build_recommendation(
             & (df["track_temp"].between(track_temp - 5, track_temp + 5))
         ]
 
-        results.append(
+        raw_results.append(
             {
                 "Position": position,
+                "Auto": car_model,
                 "Reifen": tire_type,
                 "Außentemp": round(ambient_temp, 1),
                 "Streckentemp": round(track_temp, 1),
                 "Basis-Druckaufbau": round(base_build, 3),
                 "Fahrer-Offset": round(driver_offset, 3),
                 "Finaler Druckaufbau": round(final_build, 3),
-                "Ziel-Heißdruck": round(target_pressure, 3),
-                "Einstelldruck @10°C": round(cold_pressure_10C, 3),
+                "Zieldruck": round(target_pressure, 3),
+                "Modell-Empfehlung @10°C": round(cold_pressure_10C_raw, 3),
+                "Einstelldruck @10°C": round(cold_pressure_10C_raw, 3),
                 "Ähnliche Daten": len(similar_data),
+                "Auto-Korrektur": 0.0,
                 "Fahrer-Daten genutzt": driver_count,
                 "Offset-Quelle": offset_source,
             }
         )
 
-    return pd.DataFrame(results)
+    result_df = pd.DataFrame(raw_results)
+
+    # Porsche-Regel anwenden
+    # T_L = A_L - 0,05
+    # T_R = A_R - 0,05
+
+    if car_model == "Porsche":
+        pressure_by_position = dict(
+            zip(
+                result_df["Position"],
+                result_df["Einstelldruck @10°C"],
+            )
+        )
+
+        if "A_L" in pressure_by_position and "T_L" in pressure_by_position:
+            new_T_L = pressure_by_position["A_L"] - 0.05
+            mask_T_L = result_df["Position"] == "T_L"
+
+            old_T_L = result_df.loc[
+                mask_T_L,
+                "Einstelldruck @10°C"
+            ].iloc[0]
+
+            result_df.loc[
+                mask_T_L,
+                "Einstelldruck @10°C"
+            ] = round(new_T_L, 3)
+
+            result_df.loc[
+                mask_T_L,
+                "Auto-Korrektur"
+            ] = round(new_T_L - old_T_L, 3)
+
+            result_df.loc[
+                mask_T_L,
+                "Finaler Druckaufbau"
+            ] = round(target_pressure - new_T_L, 3)
+
+        if "A_R" in pressure_by_position and "T_R" in pressure_by_position:
+            new_T_R = pressure_by_position["A_R"] - 0.05
+
+            mask_T_R = result_df["Position"] == "T_R"
+
+            old_T_R = result_df.loc[
+                mask_T_R,
+                "Einstelldruck @10°C"
+            ].iloc[0]
+
+            result_df.loc[
+                mask_T_R,
+                "Einstelldruck @10°C"
+            ] = round(new_T_R, 3)
+
+            result_df.loc[
+                mask_T_R,
+                "Auto-Korrektur"
+            ] = round(new_T_R - old_T_R, 3)
+
+            result_df.loc[
+                mask_T_R,
+                "Finaler Druckaufbau"
+            ] = round(target_pressure - new_T_R, 3)
+
+    return result_df
                
 ## Uplaod Excel
 
@@ -479,6 +554,11 @@ with left:
         track_options,
     )
 
+    car_model = st.selectbox(
+        "Auto",
+        CAR_MODELS,
+    )
+
     ambient_temp = st.number_input(
         "Aktuelle Außentemperatur °C",
         value=18.0,
@@ -540,7 +620,8 @@ if calculate:
         track_temp=track_temp,
         tire_type=tire_type,
         driver=driver,
-        target_pressure=target_pressure,        
+        target_pressure=target_pressure,
+        car_model=car_model,       
     )
 
     with right:
@@ -568,6 +649,7 @@ if calculate:
 
                 display_columns = [
                     "Position",
+                    "Auto",
                     "Reifen",
                     "Außentemp",
                     "Streckentemp",
