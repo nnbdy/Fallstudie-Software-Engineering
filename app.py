@@ -88,6 +88,30 @@ def extract_tire_type(value):
         return match.group(1)
     
     return np.nan
+ 
+   # Liest NS- oder GP-Runden aus Texten wie: '6NS', '1GP 3NS', '7-8 NS', 'Form + 6NS'
+
+def extract_laps_by_type(laps_raw, lap_type: str) -> str:
+    if pd.isna(laps_raw):
+        return ""
+    
+    normalized = str(laps_raw).upper()
+    normalized = normalized.replace("\n", " ")
+
+    match = re.search(
+        rf"(\d+(?:\s*-\s*\d+)?)\s*{lap_type}\b",
+        normalized,
+    )
+
+    if not match:
+        return ""
+    
+    return re.sub(
+        r"\s+",
+        "",
+        match.group(1),
+    )
+
 
 def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = clean_columns(raw_df)
@@ -98,6 +122,7 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
         "session",
         "driver",
         "tire_entry",
+        "tire_type",
         "position",
         "ambient_temp",
         "track_temp",
@@ -106,7 +131,11 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
         "cold_pressure_corr",
         "bleed_boost",
         "hot_pressure",
+        "laps_raw",
         "comment",
+        "source_sheet",
+        "source_sheet_order",
+        "source_stint_row",
     ]
 
     for column in required_cols:
@@ -121,6 +150,8 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
             "cold_pressure_corr",
             "bleed_boost",
             "hot_pressure",
+            "source_sheet_order",
+            "source_stint_row",
         ]
 
     for column in numeric_cols:
@@ -136,8 +167,10 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     df["tire_type"] = df["tire_type"].astype(str).str.upper().str.strip()
     df["track"] = df["track"].astype(str).str.strip()
     df["position"] = df["position"].astype(str).str.strip()
-    df["driver"] = df["driver"].astype(str).str.strip()
-    df["comment"] = df["comment"].astype(str).str.strip()
+    df["driver"] = df["driver"].fillna("").astype(str).str.strip()
+    df["comment"] = df["comment"].fillna("").astype(str).str.strip()
+    df["laps_raw"] = df["laps_raw"].fillna("").astype(str).str.strip()
+    df["source_sheet"] = df["source_sheet"].fillna("").astype(str).str.strip()
 
     # Falls Streckentemperatur fehlt, vorübergehend Außentemperatur nutzen.
     df["track_temp_was_missing"] = df["track_temp"].isna()
@@ -405,8 +438,8 @@ def build_recommendation(
     result_df = pd.DataFrame(raw_results)
 
     # Porsche-Regel anwenden
-    # T_L = A_L - 0,05
-    # T_R = A_R - 0,05
+    # H_L = V_L - 0,05
+    # T_R = V_R - 0,05
 
     if car_model == "Porsche":
         pressure_by_position = dict(
@@ -416,57 +449,273 @@ def build_recommendation(
             )
         )
 
-        if "A_L" in pressure_by_position and "T_L" in pressure_by_position:
-            new_T_L = pressure_by_position["A_L"] - 0.05
-            mask_T_L = result_df["Position"] == "T_L"
+        if "V_L" in pressure_by_position and "H_L" in pressure_by_position:
+            new_H_L = pressure_by_position["V_L"] - 0.05
+            mask_H_L = result_df["Position"] == "H_L"
 
-            old_T_L = result_df.loc[
-                mask_T_L,
+            old_H_L = result_df.loc[
+                mask_H_L,
                 "Einstelldruck @10°C"
             ].iloc[0]
 
             result_df.loc[
-                mask_T_L,
+                mask_H_L,
                 "Einstelldruck @10°C"
-            ] = round(new_T_L, 3)
+            ] = round(new_H_L, 3)
 
             result_df.loc[
-                mask_T_L,
+                mask_H_L,
                 "Auto-Korrektur"
-            ] = round(new_T_L - old_T_L, 3)
+            ] = round(new_H_L - old_H_L, 3)
 
             result_df.loc[
-                mask_T_L,
+                mask_H_L,
                 "Finaler Druckaufbau"
-            ] = round(target_pressure - new_T_L, 3)
+            ] = round(target_pressure - new_H_L, 3)
 
-        if "A_R" in pressure_by_position and "T_R" in pressure_by_position:
-            new_T_R = pressure_by_position["A_R"] - 0.05
+        if "V_R" in pressure_by_position and "H_R" in pressure_by_position:
+            new_H_R = pressure_by_position["V_R"] - 0.05
 
-            mask_T_R = result_df["Position"] == "T_R"
+            mask_H_R = result_df["Position"] == "H_R"
 
-            old_T_R = result_df.loc[
-                mask_T_R,
+            old_H_R = result_df.loc[
+                mask_H_R,
                 "Einstelldruck @10°C"
             ].iloc[0]
 
             result_df.loc[
-                mask_T_R,
+                mask_H_R,
                 "Einstelldruck @10°C"
-            ] = round(new_T_R, 3)
+            ] = round(new_H_R, 3)
 
             result_df.loc[
-                mask_T_R,
+                mask_H_R,
                 "Auto-Korrektur"
-            ] = round(new_T_R - old_T_R, 3)
+            ] = round(new_H_R - old_H_R, 3)
 
             result_df.loc[
-                mask_T_R,
+                mask_H_R,
                 "Finaler Druckaufbau"
-            ] = round(target_pressure - new_T_R, 3)
+            ] = round(target_pressure - new_H_R, 3)
 
     return result_df
-               
+
+# Gibt historische Einträge im Bereich Streckentemperatur ±5 °C zurück.
+def build_history_lookup(
+    df: pd.DataFrame,
+    reference_track_temp: float,
+    selected_track: str,
+    selected_tire_type: str,
+    selected_driver: str,
+    filter_same_track: bool,
+    filter_same_tire_type: bool,
+    filter_same_driver: bool,
+) -> pd.DataFrame:
+    
+    history_df = df[
+        df["track_temp"].between(
+            reference_track_temp - 5,
+            reference_track_temp + 5,
+        )
+    ].copy()
+
+    if filter_same_track:
+        history_df = history_df[
+            history_df["track"] == selected_track
+        ]
+
+    if filter_same_tire_type:
+        history_df = history_df[
+            history_df["tire_type"] == selected_tire_type
+        ]
+
+    if (
+        filter_same_driver
+        and selected_driver != "Ohne Fahrerfilter"
+    ):
+        history_df = history_df[
+            history_df["driver"] == selected_driver
+        ]
+
+    if history_df.empty:
+        return pd.DataFrame()
+    
+    history_df["NS-Runden"] = history_df["laps_raw"].apply(
+        lambda value: extract_laps_by_type(
+            value,
+            "NS",
+        )
+    )
+
+    history_df["GP-Runden"] = history_df["laps_raw"].apply(
+        lambda value: extract_laps_by_type(
+            value,
+            "GP",
+        )
+    )
+
+    history_df["Temperaturabweichung °C"] = (
+        history_df["track_temp"]
+        - reference_track_temp
+    ).round(1)
+
+    history_df["Sortierung Temperatur"] = (
+        history_df["Temperaturabweichung °C"].abs()
+    )
+
+    history_df["Streckentemp geschätzt"] = history_df[
+        "track_temp_was_missing"
+    ].map(
+        {
+            True: "ja",
+            False: "nein",
+        }
+    )
+
+    # Diese Werte sind für alle vier Reifen eines Stints identisch.
+    index_columns = [
+        "source_sheet",
+        "source_sheet_order",
+        "source_stint_row",
+        "event",
+        "session",
+        "driver",
+        "tire_entry",
+        "tire_type",
+        "track",
+        "track_temp",
+        "Temperaturabweichung °C",
+        "Streckentemp geschätzt",
+        "laps_raw",
+        "NS-Runden",
+        "GP-Runden",
+        "comment",
+    ]
+
+    # Die vier Reifenpositionen werden nebeneinander angeordnet.
+    wide_df = history_df.pivot_table(
+        index=index_columns,
+        columns="position",
+        values=[
+            "cold_pressure_corr",
+            "bleed_boost",
+            "hot_pressure",
+        ],
+        aggfunc="first",
+    ).reset_index()
+
+    # Mehrstufige Pandas-Spaltennamen vereinfachen.
+    metric_names = {
+        "cold_pressure_corr": "Einstelldruck @10°C",
+        "bleed_boost": "Bleed/Boost",
+        "hot_pressure": "Gemessener Heißdruck",
+    }
+
+    flattened_columns = []
+
+    for column in wide_df.columns:
+        if not isinstance(column, tuple):
+            flattened_columns.append(column)
+            continue
+
+        metric, position = column
+
+        if position == "":
+            flattened_columns.append(metric)
+        else:
+            flattened_columns.append(
+                f"{position} {metric_names.get(metric, metric)}"
+            )
+
+    wide_df.columns = flattened_columns
+
+    wide_df = wide_df.rename(
+        columns={
+            "event": "Event",
+            "session": "Session",
+            "driver": "Fahrer",
+            "tire_entry": "Reifensatz",
+            "tire_type": "Reifenart",
+            "track": "Strecke",
+            "track_temp": "Streckentemp °C",
+            "laps_raw": "Runden Original",
+            "comment": "Kommentar",            
+        }
+    )
+# Gewünschte Reihenfolge der Reifenpositionen
+    position_order = [
+        "V_R",
+        "V_L",
+        "H_R",
+        "H_L",
+    ]
+
+    position_columns = []
+
+    for position in position_order:
+        position_columns.append(
+            f"{position} Einstelldruck @10°C"
+        )
+
+    for position in position_order:
+        position_columns.append(
+            f"{position} Gemessener Heißdruck"
+        )
+
+    for position in position_order:
+        position_columns.append(
+            f"{position} Bleed/Boost"
+        )
+
+
+# Falls bei einem Stint ein Messwert fehlt, bleibt die Spalte leer
+    for column in position_columns:
+        if column not in wide_df.columns:
+            wide_df[column] = np.nan
+
+# Zahlen runden
+    for column in position_columns:
+        wide_df[column] = pd.to_numeric(
+            wide_df[column],
+            errors="coerce",
+        ).round(3)
+
+    wide_df["Sortierung Temperatur"] = (
+        wide_df["Temperaturabweichung °C"].abs()
+    )
+
+    wide_df = wide_df.sort_values(
+        by=[
+            "source_sheet_order",
+            "Sortierung Temperatur",
+            "source_stint_row",
+            "Reifensatz",            
+        ],
+        ascending=[
+            True,
+            True,
+            True,
+            True,
+        ]
+    )
+
+    return wide_df[
+        [
+            "Event",
+            "Session",
+            "Fahrer",
+            "Reifensatz",
+            "Reifenart",
+            "Streckentemp °C",
+            "Temperaturabweichung °C",
+            "Runden Original",
+            "NS-Runden",
+            "GP-Runden",
+            *position_columns,
+            "Kommentar",
+        ]
+    ]
+
 ## Uplaod Excel
 
 uploaded_file = st.file_uploader(
@@ -678,6 +927,80 @@ if calculate:
                     mime="text/csv",
                     use_container_width=True,
                 )
+# Historische Vergleichswerte
+
+st.divider()
+st.subheader("Historische Einträge im Temperaturbereich")
+
+show_history = st.checkbox(
+    "Historische Einträge mit Streckentemperatur ±5 °C anzeigen",    
+)
+
+if show_history:
+    st.caption(
+        f"Angezeigter Temperaturbereich: "
+        f"{track_temp - 5:.1f} °C bis {track_temp + 5:.1f} °C"
+    )
+
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+    with filter_col1:
+        filter_same_track = st.checkbox(
+            "Nur gewählte Strecke",
+            value=True,
+        )
+
+    with filter_col2:
+        filter_same_tire_type = st.checkbox(
+            "Nur gewählte Reifenart",
+            value=True,
+        )
+
+    with filter_col3:
+        filter_same_driver = st.checkbox(
+            "Nur gewählte Fahrer",
+            value=False,
+            disabled=(
+                driver == "Ohne Fahrerfilter"
+            ),
+        )
+
+    history_df = build_history_lookup(
+        df=df,
+        reference_track_temp=track_temp,
+        selected_track=track,
+        selected_tire_type=tire_type,
+        selected_driver=driver,
+        filter_same_track=filter_same_track,
+        filter_same_tire_type=filter_same_tire_type,
+        filter_same_driver=filter_same_driver,
+    )
+
+    if history_df.empty:
+        st.warning(
+            "Für diesen Temperaturbereich wurden keine historischen Einträge gefunden."        
+        )
+    
+    else:
+        st.success(
+            f"{len(history_df)} historische Einträge gefunden"
+        )
+
+        st.dataframe(
+            history_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.download_button(
+            "Historische Einträge als CSV herunterladen",
+            data=history_df.to_csv(
+                index=False
+            ).encode("utf-8"),
+            file_name="historische_reifendruckwerte.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 ## Datenqualität
 

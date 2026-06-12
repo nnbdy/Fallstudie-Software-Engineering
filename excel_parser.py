@@ -19,10 +19,10 @@ TRACK_BY_SHEET = {
 VALID_TIRE_TYPES = {"DM", "DH", "WUS"}
 
 POSITION_SPECS = [
-    ("A_L", 0, 4, 9, 14, 18),
-    ("A_R", 0, 5, 10, 15, 19),
-    ("T_L", 1, 4, 9, 14, 18),
-    ("T_R", 1, 5, 10, 15, 19),
+    ("V_L", 0, 4, 9, 14, 18),
+    ("V_R", 0, 5, 10, 15, 19),
+    ("H_L", 1, 4, 9, 14, 18),
+    ("H_R", 1, 5, 10, 15, 19),
 ]
 
 def clean_text(value) -> str:
@@ -67,7 +67,7 @@ def extract_tire_type(value):
     
     return np.nan
 
-def parse_block_sheet(raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
+def parse_block_sheet(raw: pd.DataFrame, sheet_name: str, source_sheet_order: int,) -> pd.DataFrame:
     rows = []
 
     event = clean_text(cell(raw, 0, 1)) or sheet_name
@@ -139,9 +139,12 @@ def parse_block_sheet(raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                     "cold_pressure_corr": cell(raw, source_row, corr_col),
                     "bleed_boost": cell(raw, source_row, bleed_col),
                     "hot_pressure": cell(raw, source_row, hot_col),
+                    "laps_raw": clean_text(cell(raw, row, 17)),
                     "comment": current_comment,
                     "source_sheet": sheet_name,
-                    "source_excel_row": source_row + 1,                    
+                    "source_sheet_order": source_sheet_order,
+                    "source_excel_row": source_row + 1,
+                    "source_stint_row": row + 1,              
                 }
             )
 
@@ -152,7 +155,9 @@ def load_training_data(file_bytes: bytes) -> pd.DataFrame:
 
     frames = []
 
-    for sheet_name in excel_file.sheet_names:
+    for source_sheet_order, sheet_name in enumerate(
+        excel_file.sheet_names
+    ):
         raw = pd.read_excel(
             excel_file,
             sheet_name=sheet_name,
@@ -162,6 +167,7 @@ def load_training_data(file_bytes: bytes) -> pd.DataFrame:
         parsed = parse_block_sheet(
             raw=raw,
             sheet_name=sheet_name,
+            source_sheet_order=source_sheet_order,
         )
 
         if not parsed.empty:
