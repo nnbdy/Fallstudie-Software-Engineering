@@ -373,7 +373,22 @@ def build_recommendation(
 ) -> pd.DataFrame:
     raw_results = []
 
-    positions = sorted(df["position"].dropna().unique())        
+    preferred_position_order = [
+        "V_L",
+        "V_R",
+        "H_L",
+        "H_R",
+    ]
+
+    available_positions = set(
+        df["position"].dropna().unique()
+    )
+
+    positions = [
+        position
+        for position in preferred_position_order
+        if position in available_positions
+    ]      
 
     for position in positions:
         input_row = pd.DataFrame(
@@ -644,10 +659,10 @@ def build_history_lookup(
     )
 # Gewünschte Reihenfolge der Reifenpositionen
     position_order = [
-        "V_R",
         "V_L",
-        "H_R",
+        "V_R",
         "H_L",
+        "H_R",
     ]
 
     position_columns = []
@@ -877,56 +892,57 @@ if calculate:
         car_model=car_model,       
     )
 
-    with right:
-        st.markdown("### Empfohlener Einstelldruck @10°C")
+with right:
+    st.markdown("### Empfohlener Einstelldruck @10°C")
 
-        if "recommendation" not in st.session_state:
-            st.info("Bitte links die aktuellen Bedingungen eingeben und auf „Empfehlung berechnen“ klicken")
+    if "recommendation" not in st.session_state:
+        st.info("Bitte links die aktuellen Bedingungen eingeben und auf „Empfehlung berechnen“ klicken")
+    else:
+        result_df = st.session_state["recommendation"]
+
+        if result_df.empty:
+            st.warning("Für diese Auswahl konnten keine Empfehlungen berechnet werden")
+
         else:
-            result_df = st.session_state["recommendation"]
+            metric_columns = st.columns(len(result_df))
 
-            if result_df.empty:
-                st.warning("Für diese Auswahl konnten keine Empfehlungen berechnet werden")
+            for index, (_, row) in enumerate(result_df.iterrows()):
+                with metric_columns[index]:
+                    st.metric(
+                        label=str(row["Position"]),
+                        value=f'{row["Einstelldruck @10°C"]:.2f} bar',
+                        delta=f'Druckaufbau {row["Finaler Druckaufbau"]:.2f} bar',
+                    )
+            st.markdown("### Details")
 
-            else:
-                metric_columns = st.columns(len(result_df))
+            display_columns = [
+                "Position",
+                "Auto",
+                "Reifen",
+                "Außentemp",
+                "Streckentemp",
+                "Zieldruck",
+                "Basis-Druckaufbau",
+                "Fahrer-Offset",
+                "Finaler Druckaufbau",
+                "Einstelldruck @10°C",
+                "Ähnliche Daten",
+            ]  
 
-                for index, (_, row) in enumerate(result_df.iterrows()):
-                    with metric_columns[index]:
-                        st.metric(
-                            label=str(row["Position"]),
-                            value=f'{row["Einstelldruck @10°C"]:.2f} bar',
-                            delta=f'Druckaufbau {row["Finaler Druckaufbau"]:.2f} bar',
-                        )
-                st.markdown("### Details")
+            st.dataframe(
+                result_df[display_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
 
-                display_columns = [
-                    "Position",
-                    "Auto",
-                    "Reifen",
-                    "Außentemp",
-                    "Streckentemp",
-                    "Zieldruck",
-                    "Basis-Druckaufbau",
-                    "Fahrer-Offset",
-                    "Finaler Druckaufbau",
-                    "Einstelldruck @10°C",
-                    "Ähnliche Daten",
-                ]  
-
-                st.dataframe(
-                    result_df[display_columns],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-                st.download_button(
-                    "Empfehlng als CSV herunterladen",
-                    data=result_df.to_csv(index=False).encode("utf-8"),
-                    file_name="tire_pressure_recommendation.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+            st.download_button(
+                "Empfehlng als CSV herunterladen",
+                data=result_df.to_csv(index=False).encode("utf-8"),
+                file_name="tire_pressure_recommendation.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            
 # Historische Vergleichswerte
 
 st.divider()
