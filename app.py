@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -217,7 +217,7 @@ def train_model(df):
         transformers=[
             (
                 "categorical",
-                OneHotEncoder(handle_unknown="ignore"),
+                OneHotEncoder(handle_unknown="ignore", sparse_output=False),
                 ["tire_type", "track", "position"],
             ),
             (
@@ -228,9 +228,13 @@ def train_model(df):
         ]
     )
 
-    model = RandomForestRegressor(
-        n_estimators=500,
-        min_samples_leaf=2,
+    model = HistGradientBoostingRegressor(
+        loss="squared_error",
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=15,
+        min_samples_leaf=5,
+        l2_regularization=0.1,
         random_state=42,
     )
 
