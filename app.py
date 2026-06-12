@@ -5,11 +5,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import (
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    HistGradientBoostingRegressor,
+    RandomForestRegressor,
+)
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from excel_parser import load_training_data
 
@@ -38,6 +44,15 @@ CAR_MODELS = [
 ]
 
 PORSCHE_REAR_OFFSET = -0.05
+
+MODEL_OPTIONS = [
+    "Random Forest",
+    "Extra Trees",
+    "Gradient Boosting",
+    "Ridge Regression",
+    "Lineare Regression",
+    "Hist Gradient Boosting",
+]
 
 st.set_page_config(
     page_title="Tire Pressure AI",
@@ -208,55 +223,168 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 ## Model training
-def train_model(df):
+
+def create_one_hot_encoder():
+    """
+    Unterstützt aktuelle und ältere scikit-learn-Versionen.
+    """
+    try:
+        return OneHotEncoder(
+            handle_unknown="ignore",
+            sparse_output=False,
+        )
+    except TypeError:
+        return OneHotEncoder(
+            handle_unknown="ignore",
+            sparse=False,
+        )
+
+
+def create_regressor(model_name: str):
+    if model_name == "Random Forest":
+        return RandomForestRegressor(
+            n_estimators=500,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+        )
+
+    if model_name == "Extra Trees":
+        return ExtraTreesRegressor(
+            n_estimators=500,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+        )
+
+    if model_name == "Gradient Boosting":
+        return GradientBoostingRegressor(
+            n_estimators=250,
+            learning_rate=0.03,
+            max_depth=3,
+            min_samples_leaf=3,
+            loss="squared_error",
+            random_state=42,
+        )
+
+    if model_name == "Ridge Regression":
+        return Ridge(
+            alpha=1.0,
+        )
+
+    if model_name == "Lineare Regression":
+        return LinearRegression()
+
+    if model_name == "Hist Gradient Boosting":
+        return HistGradientBoostingRegressor(
+            max_iter=200,
+            learning_rate=0.05,
+            max_leaf_nodes=15,
+            min_samples_leaf=5,
+            l2_regularization=0.1,
+            random_state=42,
+        )
+
+    raise ValueError(
+        f"Unbekanntes Modell: {model_name}"
+    )
+
+def train_model(
+    df: pd.DataFrame,
+    model_name: str,
+):
     if len(df) < 4:
         raise ValueError(
             "Es sind weniger als vier gültige Trainingszeilen vorhanden."
         )
+
     preprocessor = ColumnTransformer(
         transformers=[
             (
                 "categorical",
-                OneHotEncoder(handle_unknown="ignore"),
-                ["tire_type", "track", "position"],
+                create_one_hot_encoder(),
+                [
+                    "tire_type",
+                    "track",
+                    "position",
+                ],
             ),
             (
                 "numeric",
                 "passthrough",
-                ["ambient_temp", "track_temp"],
-            )
+                [
+                    "ambient_temp",
+                    "track_temp",
+                ],
+            ),
         ]
     )
 
-    model = RandomForestRegressor(
-        n_estimators=500,
-        min_samples_leaf=2,
-        random_state=42,
+    regressor = create_regressor(
+        model_name=model_name,
+    )
+
+    pipeline_steps = [
+        (
+            "preprocessor",
+            preprocessor,
+        ),
+    ]
+
+    # Lineare Modelle profitieren von skalierten Eingaben.
+    if model_name in [
+        "Ridge Regression",
+        "Lineare Regression",
+    ]:
+        pipeline_steps.append(
+            (
+                "scaler",
+                StandardScaler(),
+            )
+        )
+
+    pipeline_steps.append(
+        (
+            "model",
+            regressor,
+        )
     )
 
     pipeline = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            ("model", model),
-        ]
+        steps=pipeline_steps
     )
 
-    x = df[FEATURES]
-    y = df["pressure_build"]
+    features = df[FEATURES]
+    target = df["pressure_build"]
 
     if len(df) >= 30:
         x_train, x_test, y_train, y_test = train_test_split(
-            x,
-            y,
+            features,
+            target,
             test_size=0.25,
             random_state=42,
         )
 
-        pipeline.fit(x_train, y_train)
-        prediction = pipeline.predict(x_test)
-        mae = mean_absolute_error(y_test, prediction)
+        pipeline.fit(
+            x_train,
+            y_train,
+        )
+
+        prediction = pipeline.predict(
+            x_test
+        )
+
+        mae = mean_absolute_error(
+            y_test,
+            prediction,
+        )
+
     else:
-        pipeline.fit(x, y)
+        pipeline.fit(
+            features,
+            target,
+        )
+
         mae = None
 
     return pipeline, mae
@@ -401,8 +529,8 @@ def build_recommendation(
     result_df = pd.DataFrame(raw_results)
 
     # Porsche-Regel anwenden
-    # T_L = A_L - 0,05
-    # T_R = A_R - 0,05
+    # H_L = V_L - 0,05
+    # T_R = V_R - 0,05
 
     if car_model == "Porsche":
         pressure_by_position = dict(
@@ -412,57 +540,158 @@ def build_recommendation(
             )
         )
 
-        if "A_L" in pressure_by_position and "T_L" in pressure_by_position:
-            new_T_L = pressure_by_position["A_L"] - 0.05
-            mask_T_L = result_df["Position"] == "T_L"
+        if "V_L" in pressure_by_position and "H_L" in pressure_by_position:
+            new_H_L = pressure_by_position["V_L"] - 0.05
+            mask_H_L = result_df["Position"] == "H_L"
 
-            old_T_L = result_df.loc[
-                mask_T_L,
+            old_H_L = result_df.loc[
+                mask_H_L,
                 "Einstelldruck @10°C"
             ].iloc[0]
 
             result_df.loc[
-                mask_T_L,
+                mask_H_L,
                 "Einstelldruck @10°C"
-            ] = round(new_T_L, 3)
+            ] = round(new_H_L, 3)
 
             result_df.loc[
-                mask_T_L,
+                mask_H_L,
                 "Auto-Korrektur"
-            ] = round(new_T_L - old_T_L, 3)
+            ] = round(new_H_L - old_H_L, 3)
 
             result_df.loc[
-                mask_T_L,
+                mask_H_L,
                 "Finaler Druckaufbau"
-            ] = round(target_pressure - new_T_L, 3)
+            ] = round(target_pressure - new_H_L, 3)
 
-        if "A_R" in pressure_by_position and "T_R" in pressure_by_position:
-            new_T_R = pressure_by_position["A_R"] - 0.05
+        if "V_R" in pressure_by_position and "H_R" in pressure_by_position:
+            new_H_R = pressure_by_position["V_R"] - 0.05
 
-            mask_T_R = result_df["Position"] == "T_R"
+            mask_H_R = result_df["Position"] == "H_R"
 
-            old_T_R = result_df.loc[
-                mask_T_R,
+            old_H_R = result_df.loc[
+                mask_H_R,
                 "Einstelldruck @10°C"
             ].iloc[0]
 
             result_df.loc[
-                mask_T_R,
+                mask_H_R,
                 "Einstelldruck @10°C"
-            ] = round(new_T_R, 3)
+            ] = round(new_H_R, 3)
 
             result_df.loc[
-                mask_T_R,
+                mask_H_R,
                 "Auto-Korrektur"
-            ] = round(new_T_R - old_T_R, 3)
+            ] = round(new_H_R - old_H_R, 3)
 
             result_df.loc[
-                mask_T_R,
+                mask_H_R,
                 "Finaler Druckaufbau"
-            ] = round(target_pressure - new_T_R, 3)
+            ] = round(target_pressure - new_H_R, 3)
 
     return result_df
-               
+
+def build_model_comparison(
+    df: pd.DataFrame,
+    track: str,
+    ambient_temp: float,
+    track_temp: float,
+    tire_type: str,
+    driver: str,
+    target_pressure: float,
+    car_model: str,
+) -> pd.DataFrame:
+    comparison_rows = []
+
+    for model_name in MODEL_OPTIONS:
+        try:
+            comparison_model, comparison_mae = train_model(
+                df=df,
+                model_name=model_name,
+            )
+
+            recommendation_df = build_recommendation(
+                df=df,
+                model=comparison_model,
+                track=track,
+                ambient_temp=ambient_temp,
+                track_temp=track_temp,
+                tire_type=tire_type,
+                driver=driver,
+                target_pressure=target_pressure,
+                car_model=car_model,
+            )
+
+            pressure_by_position = dict(
+                zip(
+                    recommendation_df["Position"],
+                    recommendation_df["Einstelldruck @10°C"],
+                )
+            )
+
+            comparison_rows.append(
+                {
+                    "Modell": model_name,
+                    "MAE bar": (
+                        round(comparison_mae, 4)
+                        if comparison_mae is not None
+                        else np.nan
+                    ),
+                    "V_L bar": pressure_by_position.get(
+                        "V_L",
+                        np.nan,
+                    ),
+                    "V_R bar": pressure_by_position.get(
+                        "V_R",
+                        np.nan,
+                    ),
+                    "H_L bar": pressure_by_position.get(
+                        "H_L",
+                        np.nan,
+                    ),
+                    "H_R bar": pressure_by_position.get(
+                        "H_R",
+                        np.nan,
+                    ),
+                    "Fehler": "",
+                }
+            )
+
+        except Exception as error:
+            comparison_rows.append(
+                {
+                    "Modell": model_name,
+                    "MAE bar": np.nan,
+                    "V_L bar": np.nan,
+                    "V_R bar": np.nan,
+                    "H_L bar": np.nan,
+                    "H_R bar": np.nan,
+                    "Fehler": str(error),
+                }
+            )
+
+    comparison_df = pd.DataFrame(
+        comparison_rows
+    )
+
+    comparison_df = comparison_df.sort_values(
+        by="MAE bar",
+        na_position="last",
+    ).reset_index(
+        drop=True
+    )
+
+    comparison_df.insert(
+        0,
+        "Rang",
+        range(
+            1,
+            len(comparison_df) + 1,
+        ),
+    )
+
+    return comparison_df
+
 ## Uplaod Excel
 
 uploaded_file = st.file_uploader(
@@ -525,17 +754,50 @@ if len(df) < 20:
 with st.expander("Bereinigte Trainingsdatem anzeigen"):
     st.dataframe(df, use_container_width=True)
 
+
 ## Modell trainieren
+
+st.subheader("Modellauswahl")
+
+selected_model = st.selectbox(
+    "Regressionsmodell für die Hauptempfehlung",
+    MODEL_OPTIONS,
+    index=0,
+)
+
+# Alte Ergebnisse löschen, wenn das Modell gewechselt wird.
+if st.session_state.get("selected_model") != selected_model:
+    st.session_state.pop("recommendation", None)
+    st.session_state.pop("model_comparison", None)
+    st.session_state["selected_model"] = selected_model
+
 try:
-    model, mae = train_model(df)
+    model, mae = train_model(
+        df=df,
+        model_name=selected_model,
+    )
+
 except ValueError as error:
     st.error(str(error))
     st.stop()
 
 if mae is not None:
-    st.success(f"Modell trainiert. Testfehler: {mae:.3f} bar")
+    st.success(
+        f"{selected_model} trainiert. "
+        f"Testfehler MAE: {mae:.3f} bar"
+    )
+
+    st.metric(
+        label=f"MAE — {selected_model}",
+        value=f"{mae:.3f} bar",
+    )
+
 else:
-    st.success("Modell trainiert. Für einen Testfehler sind zu wenig Daten vorhanden")
+    st.success(
+        f"{selected_model} trainiert. "
+        "Für einen separaten Testdatensatz sind noch "
+        "zu wenig Trainingszeilen vorhanden."
+    )
 
 ## Interface
 
@@ -674,6 +936,71 @@ if calculate:
                     mime="text/csv",
                     use_container_width=True,
                 )
+
+
+# ============================================================
+# Modellvergleich
+# ============================================================
+
+st.divider()
+st.subheader("Vergleichstabelle der Modelle")
+
+st.write(
+    "Die Tabelle vergleicht den MAE und die berechneten "
+    "Einstelldrücke für die aktuell gewählten Bedingungen."
+)
+
+comparison_signature = (
+    track,
+    float(ambient_temp),
+    float(track_temp),
+    tire_type,
+    driver,
+    float(target_pressure),
+    car_model,
+)
+
+# Alte Tabelle löschen, wenn sich eine Eingabe geändert hat.
+if st.session_state.get("comparison_signature") != comparison_signature:
+    st.session_state.pop("model_comparison", None)
+    st.session_state["comparison_signature"] = comparison_signature
+
+if st.button(
+    "Alle Modelle vergleichen",
+    use_container_width=True,
+):
+    st.session_state["model_comparison"] = build_model_comparison(
+        df=df,
+        track=track,
+        ambient_temp=ambient_temp,
+        track_temp=track_temp,
+        tire_type=tire_type,
+        driver=driver,
+        target_pressure=target_pressure,
+        car_model=car_model,
+    )
+
+if "model_comparison" in st.session_state:
+    comparison_df = st.session_state["model_comparison"]
+
+    st.dataframe(
+        comparison_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    valid_comparison = comparison_df.dropna(
+        subset=["MAE bar"]
+    )
+
+    if not valid_comparison.empty:
+        best_model = valid_comparison.iloc[0]
+
+        st.success(
+            f'Bestes Modell nach MAE: '
+            f'{best_model["Modell"]} '
+            f'mit {best_model["MAE bar"]:.4f} bar'
+        )
 
 ## Datenqualität
 
