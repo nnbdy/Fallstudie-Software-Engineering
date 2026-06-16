@@ -4,17 +4,17 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 
-TRACK_BY_SHEET = {
-    "24h Race": "NBR",
-    "24H Q": "NBR",
-    "Qualifiers 2": "NBR",
-    "Qualifiers 1": "NBR",
-    "NLS3 25": "NBR",
-    "NLS2 25": "NBR",
-    "NLS1 25": "NBR",
-    "NLS6 24": "NBR",
-    "NLS5 24": "NBR",
-}
+# TRACK_BY_SHEET = {
+#     "24h Race": "NBR",
+#     "24H Q": "NBR",
+#     "Qualifiers 2": "NBR",
+#     "Qualifiers 1": "NBR",
+#     "NLS3 25": "NBR",
+#     "NLS2 25": "NBR",
+#     "NLS1 25": "NBR",
+#     "NLS6 24": "NBR",
+#     "NLS5 24": "NBR",
+# }
 
 VALID_TIRE_TYPES = {"DM", "DH", "WUS"}
 
@@ -121,7 +121,7 @@ def parse_block_sheet(raw: pd.DataFrame, sheet_name: str, source_sheet_order: in
     rows = []
 
     event = clean_text(cell(raw, 0, 1)) or sheet_name
-    track = TRACK_BY_SHEET.get(sheet_name, sheet_name)
+    track = "NBR"
     car_model = extract_car_model(raw, sheet_name)
 
     current_driver = ""

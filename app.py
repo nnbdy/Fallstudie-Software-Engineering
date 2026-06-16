@@ -34,7 +34,7 @@ TIRE_LABELS = {
 
 BASE_CAR_MODEL = "BMW M4"
 MIN_BASE_MODEL_ROWS = 20
-MIN_CAR_FINETUNE_ROWS = 10
+MIN_CAR_FINETUNE_ROWS = 5
 MAX_CAR_CORRECTION = 0.12
 
 
@@ -1193,7 +1193,7 @@ if show_history:
         f"{track_temp - 5:.1f} °C bis {track_temp + 5:.1f} °C"
     )
 
-    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(3)
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
 
     with filter_col1:
         filter_same_track = st.checkbox(
@@ -1226,9 +1226,9 @@ if show_history:
         df=df,
         reference_track_temp=track_temp,
         selected_track=track,
-        selected_car_model=car_model,
         selected_tire_type=tire_type,
         selected_driver=driver,
+        selected_car_model=car_model,
         filter_same_track=filter_same_track,
         filter_same_tire_type=filter_same_tire_type,
         filter_same_driver=filter_same_driver,
