@@ -534,6 +534,7 @@ def calculate_driver_offset(
         df: pd.DataFrame,
         model_bundle: dict,
         driver: str,
+        car_model: str,
         tire_type: str,
         track: str,
         position: str,
