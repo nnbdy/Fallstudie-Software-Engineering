@@ -78,6 +78,19 @@ def to_number(series):
         errors="coerce",
     )
 
+def convert_pressure_from_10C_to_temperature(
+        pressure_10C: float,
+        target_temperature_C: float,
+) -> float:
+    return(
+        (pressure_10C + 1.0)
+        *(
+            (target_temperature_C + 273.15)
+            / (REFERENCE_TEMP_C + 273.15)
+        )
+        - 1.0
+    )
+
 def extract_tire_type(value):
     if pd.isna(value):
         return np.nan
@@ -601,7 +614,7 @@ def calculate_driver_offset(
         subset = data.loc[mask]
 
         if len(subset) >= min_count:
-            offset = float(subset["residual"].mean())
+            offset = float(subset["driver_residual"].mean())
 
             # Fahrer nur als kleiner Korrekturfaktor
             offset = float(np.clip(offset, -0.05, 0.05))
@@ -801,6 +814,7 @@ def build_history_lookup(
         "event",
         "session",
         "driver",
+        "car_model",
         "tire_entry",
         "tire_type",
         "track",
@@ -855,6 +869,7 @@ def build_history_lookup(
             "event": "Event",
             "session": "Session",
             "driver": "Fahrer",
+            "car_model": "Auto",
             "tire_entry": "Reifensatz",
             "tire_type": "Reifenart",
             "track": "Strecke",
@@ -1166,6 +1181,64 @@ with right:
 
             st.dataframe(
                 result_df[display_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("Umrechnung auf Einstelltemperatur")
+
+            conversion_temperature = st.number_input(
+                "Einstelltemperatur für Umrechnung °C",
+                value=10.0,
+                step=1.0,
+                format="%.1f",
+            )
+
+            converted_df = result_df[
+                [
+                    "Position",
+                    "Einstelldruck @10°C"
+                ]
+            ].copy()
+
+            preferred_position_order = [
+                "V_L",
+                "V_R",
+                "H_L",
+                "H_R",
+            ]
+
+            position_rank = {
+                position: index
+                for index, position in enumerate(preferred_position_order)
+            }
+
+            converted_df["position_order"] = converted_df["Position"].map(
+                position_rank
+            ).fillna(999)
+
+            converted_df = converted_df.sort_values(
+                by="position_order"
+            ).drop(
+                columns="position_order"
+            ).reset_index(
+                drop=True
+            )
+
+            converted_df["Einstelldruck bei Einstelltemperatur"]= converted_df[
+                "Einstelldruck @10°C"
+            ].apply(
+                lambda pressure_10C: round(
+                    convert_pressure_from_10C_to_temperature(
+                        pressure_10C=pressure_10C,
+                        target_temperature_C=conversion_temperature,
+                    ),
+                    3,
+                )
+            )
+
+            st.dataframe(
+                converted_df,
                 use_container_width=True,
                 hide_index=True,
             )
