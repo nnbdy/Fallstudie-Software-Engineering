@@ -1,5 +1,5 @@
 import re
-from io import BytesIO
+#from io import BytesIO
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,7 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
+from typing import Any
 
 from excel_parser import load_training_data
 
@@ -31,13 +32,11 @@ TIRE_LABELS = {
     "WUS": "WUS - Regen",
 }
 
-CAR_MODELS = [
-    "BMW",
-    "Supra",
-    "Porsche",
-]
+BASE_CAR_MODEL = "BMW M4"
+MIN_BASE_MODEL_ROWS = 20
+MIN_CAR_FINETUNE_ROWS = 10
+MAX_CAR_CORRECTION = 0.12
 
-PORSCHE_REAR_OFFSET = -0.05
 
 st.set_page_config(
     page_title="Tire Pressure AI",
@@ -90,7 +89,6 @@ def extract_tire_type(value):
     return np.nan
  
    # Liest NS- oder GP-Runden aus Texten wie: '6NS', '1GP 3NS', '7-8 NS', 'Form + 6NS'
-
 def extract_laps_by_type(laps_raw, lap_type: str) -> str:
     if pd.isna(laps_raw):
         return ""
@@ -112,6 +110,34 @@ def extract_laps_by_type(laps_raw, lap_type: str) -> str:
         match.group(1),
     )
 
+def normalize_car_model(value: Any) -> float | str:
+    if pd.isna(value):
+        return np.nan
+    
+    text = str(value).strip()
+
+    if text == "" or text.lower() in {"nan", "none", "null"}:
+        return np.nan
+    
+    compact = re.sub(r"[^A-Z0-9]", "", text.upper())
+
+    aliases = {
+        "BMW": "BMW M4",
+        "BM": "BMW M4",
+        "M4": "BMW M4",
+        "BMWM4": "BMW M4",
+        "BMWM4GT3": "BMW M4",
+        "SUPRA": "Supra",
+        "TOYOTASUPRA": "Supra",
+        "GRSUPRA": "Supra",
+        "PORSCHE": "Porsche",
+        "992": "Porsche",
+        "911": "Porsche",
+        "PORSCHE992": "Porsche",
+        "PORSCHE911": "Porsche",
+    }
+
+    return aliases.get(compact, text)
 
 def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     df = clean_columns(raw_df)
@@ -119,6 +145,7 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     required_cols = [
         "event",
         "track",
+        "car_model",
         "session",
         "driver",
         "tire_entry",
@@ -165,6 +192,8 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df["tire_type"] = df["tire_type"].astype(str).str.upper().str.strip()
+    df["car_model"] = df["car_model"].apply(normalize_car_model)
+    df["car_model"] = df["car_model"].fillna(BASE_CAR_MODEL)
     df["track"] = df["track"].astype(str).str.strip()
     df["position"] = df["position"].astype(str).str.strip()
     df["driver"] = df["driver"].fillna("").astype(str).str.strip()
@@ -241,11 +270,7 @@ def prepare_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 ## Model training
-def train_model(df):
-    if len(df) < 4:
-        raise ValueError(
-            "Es sind weniger als vier gültige Trainingszeilen vorhanden."
-        )
+def make_pressure_build_pipeline() -> Pipeline:
     preprocessor = ColumnTransformer(
         transformers=[
             (
@@ -278,29 +303,236 @@ def train_model(df):
         ]
     )
 
-    x = df[FEATURES]
-    y = df["pressure_build"]
+    return pipeline
 
-    if len(df) >= 30:
+def train_model(df: pd.DataFrame) -> tuple[dict, float | None]:
+    base_df = df[
+        df["car_model"] == BASE_CAR_MODEL
+    ].copy()
+
+    if len(base_df) < MIN_BASE_MODEL_ROWS:
+        raise ValueError(
+            f"Zu wenige {BASE_CAR_MODEL}-Daten für das Basismodell. "
+            f"Gefunden: {len(base_df)} Zeilen. "
+            f"Benötigt: mindestens {MIN_BASE_MODEL_ROWS} Zeilen."
+        )
+    
+    x_base = base_df[FEATURES]
+    y_base = base_df["pressure_build"]
+
+    base_mae = None
+
+    if len(base_df) >= 40:
         x_train, x_test, y_train, y_test = train_test_split(
-            x,
-            y,
+            x_base,
+            y_base,
             test_size=0.25,
             random_state=42,
         )
 
-        pipeline.fit(x_train, y_train)
-        prediction = pipeline.predict(x_test)
-        mae = mean_absolute_error(y_test, prediction)
-    else:
-        pipeline.fit(x, y)
-        mae = None
+        evaluation_model = make_pressure_build_pipeline()
+        evaluation_model.fit(
+            x_train,
+            y_train,
+        )
 
-    return pipeline, mae
+        prediction = evaluation_model.predict(x_test)
+        base_mae = mean_absolute_error(
+            y_test,
+            prediction,
+        )
+
+# Für die eigentliche App wird das Basismodell auf allen BMW-M4-Daten trainiert.
+    base_model = make_pressure_build_pipeline()
+    base_model.fit(
+        x_base,
+        y_base,
+    )
+
+    working_df = df.copy()
+    working_df["bmw_base_prediction"] = base_model.predict(
+        working_df[FEATURES]
+    )
+
+    working_df["car_residual"] = (
+        working_df["pressure_build"] 
+        - working_df["bmw_base_prediction"] 
+    )
+
+    car_correction_models = {}
+    car_correction_offsets = {}
+    car_training_summary = []
+
+    for car_name, car_df in working_df.groupby("car_model"):
+        car_df = car_df.copy()
+
+        if car_name == BASE_CAR_MODEL:
+            car_correction_offsets[car_name] = 0.0
+
+            car_training_summary.append(
+                {
+                    "Auto": car_name,
+                    "Trainingszeilen": len(car_df),
+                    "Korrekturart": "Basismodell",
+                    "Mittlere Korrektur": 0.0,
+                }
+            )
+            continue
+
+        mean_offset = float(
+            np.clip(
+                car_df["car_residual"].mean(),
+                -MAX_CAR_CORRECTION,
+                MAX_CAR_CORRECTION,
+            )
+        )
+
+        if len(car_df) >= MIN_CAR_FINETUNE_ROWS:
+            correction_model = make_pressure_build_pipeline()
+            correction_model.fit(
+                car_df[FEATURES],
+                car_df["car_residual"],
+            )
+
+            car_correction_models[car_name] = correction_model
+
+            correction_type = "Korrekturmodell"
+        else:
+            car_correction_offsets[car_name] = mean_offset
+            correction_type = "Mittelwert-Offset"
+
+        car_training_summary.append(
+            {
+                "Auto": car_name,
+                "Trainingszeilen": len(car_df),
+                "Korrekturart": correction_type,
+                "Mittlere Korrektur": round(mean_offset, 3),
+            }
+        )
+
+    model_bundle = {
+        "base_model": base_model,
+        "car_correction_models": car_correction_models,
+        "car_correction_offsets": car_correction_offsets,
+        "base_mae": base_mae,
+        "training_rows_total": len(df),
+        "training_rows_base": len(base_df),
+        "car_training_summary": pd.DataFrame(car_training_summary),
+    }
+
+    return model_bundle, base_mae
+
+def get_car_correction(
+        model_bundle: dict,
+        input_df: pd.DataFrame,
+        car_model: str,
+) -> tuple[float, str]:
+    if car_model == BASE_CAR_MODEL:
+        return 0.0, "BMW-M4-Basis"
+    
+    correction_models = model_bundle["car_correction_models"]
+    correction_offsets = model_bundle["car_correction_offsets"]
+
+    if car_model in correction_models:
+        correction = float(
+            correction_models[car_model].predict(input_df)[0]
+        )
+
+        correction = float(
+            np.clip(
+                correction,
+                -MAX_CAR_CORRECTION,
+                MAX_CAR_CORRECTION,
+            )
+        )
+
+        return correction, "Korrekturmodell"
+    
+    if car_model in correction_offsets:
+        return float(correction_offsets[car_model]), "Mittelwert-Offset"
+    
+    return 0.0, "Keine Auto-Daten"
+
+def predict_pressure_build_for_car(
+        model_bundle: dict,
+        input_df: pd.DataFrame,
+        car_model: str,
+) -> tuple[float, float, float, str]:
+    base_model = model_bundle["base_model"]
+
+    bmw_base_build = float(
+        base_model.predict(input_df)[0]
+    )
+
+    car_correction, correction_source = get_car_correction(
+        model_bundle=model_bundle,
+        input_df=input_df,
+        car_model=car_model,
+    )
+
+    car_adjusted_build = bmw_base_build + car_correction
+
+    return (
+        bmw_base_build,
+        car_correction,
+        car_adjusted_build,
+        correction_source,
+    )
+
+def add_car_adjusted_predictions(
+        df: pd.DataFrame,
+        model_bundle: dict,
+) -> pd.DataFrame:
+    data = df.copy()
+
+    data["bmw_base_prediction"] = model_bundle["base_model"].predict(
+        data[FEATURES]
+    )
+
+    data["car_correction_prediction"] = 0.0
+    data["car_correction_source"] = "BMW-M4-Basis"
+
+    for car_name, index_values in data.groupby("car_model").groups.items():
+        car_input = data.loc[index_values, FEATURES]
+
+        if car_name == BASE_CAR_MODEL:
+            continue
+
+        correction_models = model_bundle["car_correction_models"]
+        correction_offsets = model_bundle["car_correction_offsets"]
+
+        if car_name in correction_models:
+            correction_values = correction_models[car_name].predict(
+                car_input
+            )
+
+            correction_values = np.clip(
+                correction_values,
+                -MAX_CAR_CORRECTION,
+                MAX_CAR_CORRECTION,
+            )
+
+            data.loc[index_values, "car_correction_prediction"] = correction_values
+            data.loc[index_values, "car_correction_source"] = "Korrekturmodell"
+
+        elif car_name in correction_offsets:
+            data.loc[index_values, "car_correction_prediction"] = correction_offsets[car_name]
+            data.loc[index_values, "car_correction_source"] = "Mittelwert-Offset"
+
+        else:
+            data.loc[index_values, "car_correction_prediction"] = 0.0
+            data.loc[index.values, "car_correction_source"] = "Keine Auto-Daten"
+
+    data["car_adjusted_prediction"] = (
+        data["bmw_base_prediction"]
+        + data["car_correction_prediction"]
+    )
+
+    return data
 
 def calculate_driver_offset(
         df: pd.DataFrame,
-        model,
+        model_bundle: dict,
         driver: str,
         tire_type: str,
         track: str,
@@ -312,15 +544,22 @@ def calculate_driver_offset(
     if driver == "Ohne Fahrerfilter":
         return 0.0, 0, "Kein Fahrerfilter"
     
-    data = df.copy()
-    data["base_prediction"] = model.predict(data[FEATURES])
-    data["residual"] = data["pressure_build"] - data["base_prediction"]
+    data = add_car_adjusted_predictions(
+        df=df,
+        model_bundle=model_bundle,
+    )
+
+    data["driver_residual"] = (
+        data["pressure_build"]
+        - data["car_adjusted_prediction"]
+    )
 
     filters = [
         (
-            "Fahrer + Reifen + Strecke + Position + Temperaturbereich",
+            "Fahrer + Auto + Reifen + Strecke + Position + Temperaturbereich",
             (
                 (data["driver"] == driver)
+                & (data["car_model"] == car_model)
                 & (data["tire_type"] == tire_type)
                 & (data["track"] == track)
                 & (data["position"] == position)
@@ -329,12 +568,22 @@ def calculate_driver_offset(
             ),
         ),
         (
-            "Fahrer + Reifen + Strecke + Position",
+            "Fahrer + Auto + Reifen + Strecke + Position",
             (
                 (data["driver"] == driver)
+                & (data["car_model"] == car_model)
                 & (data["tire_type"] == tire_type)
                 & (data["track"] == track)
                 & (data["position"] == position)
+            ),
+        ),
+        (
+            "Fahrer + Auto + Reifen + Position",
+            (
+                (data["driver"] == driver)
+                & (data["car_model"] == car_model)
+                & (data["tire_type"] == tire_type)
+                & (data["position"] == position)               
             ),
         ),
         (
@@ -342,7 +591,7 @@ def calculate_driver_offset(
             (
                 (data["driver"] == driver)
                 & (data["tire_type"] == tire_type)
-                & (data["position"] == position)               
+                & (data["position"] == position)
             ),
         ),
     ]
@@ -362,7 +611,7 @@ def calculate_driver_offset(
 
 def build_recommendation(
     df: pd.DataFrame,
-    model,
+    model_bundle: dict,
     track: str,
     ambient_temp: float,
     track_temp: float,
@@ -403,11 +652,21 @@ def build_recommendation(
             ]
         )
 
-        base_build = float(model.predict(input_row)[0])
+        (
+            bmw_base_build,
+            car_correction,
+            car_adjusted_build,
+            correction_source,
+        ) = predict_pressure_build_for_car(
+            model_bundle=model_bundle,
+            input_df=input_row,
+            car_model=car_model,
+        )
 
         driver_offset, driver_count, offset_source = calculate_driver_offset(
             df=df,
-            model=model,
+            model_bundle=model_bundle,
+            car_model=car_model,
             driver=driver,
             tire_type=tire_type,
             track=track,
@@ -416,7 +675,7 @@ def build_recommendation(
             track_temp=track_temp,
         )
 
-        final_build = base_build + driver_offset
+        final_build = car_adjusted_build + driver_offset
 
         # Hier wird der Zieldruck eingerechnet
         # Ausgabe immer bei 10C
@@ -424,6 +683,7 @@ def build_recommendation(
 
         similar_data = df[
             (df["track"] == track)
+            & (df["car_model"] == car_model)
             & (df["tire_type"] == tire_type)
             & (df["position"] == position)
             & (df["ambient_temp"].between(ambient_temp - 3, ambient_temp + 3))
@@ -437,93 +697,33 @@ def build_recommendation(
                 "Reifen": tire_type,
                 "Außentemp": round(ambient_temp, 1),
                 "Streckentemp": round(track_temp, 1),
-                "Basis-Druckaufbau": round(base_build, 3),
+                "Basis-Druckaufbau": round(bmw_base_build, 3),
+                "Auto-Korrektur": round(car_correction, 3),
+                "Auto-Korrektur Quelle": correction_source,
                 "Fahrer-Offset": round(driver_offset, 3),
                 "Finaler Druckaufbau": round(final_build, 3),
                 "Zieldruck": round(target_pressure, 3),
-                "Modell-Empfehlung @10°C": round(cold_pressure_10C_raw, 3),
                 "Einstelldruck @10°C": round(cold_pressure_10C_raw, 3),
                 "Ähnliche Daten": len(similar_data),
-                "Auto-Korrektur": 0.0,
                 "Fahrer-Daten genutzt": driver_count,
                 "Offset-Quelle": offset_source,
             }
         )
 
-    result_df = pd.DataFrame(raw_results)
+    return pd.DataFrame(raw_results)
 
-    # Porsche-Regel anwenden
-    # H_L = V_L - 0,05
-    # T_R = V_R - 0,05
-
-    if car_model == "Porsche":
-        pressure_by_position = dict(
-            zip(
-                result_df["Position"],
-                result_df["Einstelldruck @10°C"],
-            )
-        )
-
-        if "V_L" in pressure_by_position and "H_L" in pressure_by_position:
-            new_H_L = pressure_by_position["V_L"] - 0.05
-            mask_H_L = result_df["Position"] == "H_L"
-
-            old_H_L = result_df.loc[
-                mask_H_L,
-                "Einstelldruck @10°C"
-            ].iloc[0]
-
-            result_df.loc[
-                mask_H_L,
-                "Einstelldruck @10°C"
-            ] = round(new_H_L, 3)
-
-            result_df.loc[
-                mask_H_L,
-                "Auto-Korrektur"
-            ] = round(new_H_L - old_H_L, 3)
-
-            result_df.loc[
-                mask_H_L,
-                "Finaler Druckaufbau"
-            ] = round(target_pressure - new_H_L, 3)
-
-        if "V_R" in pressure_by_position and "H_R" in pressure_by_position:
-            new_H_R = pressure_by_position["V_R"] - 0.05
-
-            mask_H_R = result_df["Position"] == "H_R"
-
-            old_H_R = result_df.loc[
-                mask_H_R,
-                "Einstelldruck @10°C"
-            ].iloc[0]
-
-            result_df.loc[
-                mask_H_R,
-                "Einstelldruck @10°C"
-            ] = round(new_H_R, 3)
-
-            result_df.loc[
-                mask_H_R,
-                "Auto-Korrektur"
-            ] = round(new_H_R - old_H_R, 3)
-
-            result_df.loc[
-                mask_H_R,
-                "Finaler Druckaufbau"
-            ] = round(target_pressure - new_H_R, 3)
-
-    return result_df
 
 # Gibt historische Einträge im Bereich Streckentemperatur ±5 °C zurück.
 def build_history_lookup(
     df: pd.DataFrame,
     reference_track_temp: float,
     selected_track: str,
+    selected_car_model: str,
     selected_tire_type: str,
     selected_driver: str,
     filter_same_track: bool,
     filter_same_tire_type: bool,
+    filter_same_car_model: bool,
     filter_same_driver: bool,
 ) -> pd.DataFrame:
     
@@ -537,6 +737,11 @@ def build_history_lookup(
     if filter_same_track:
         history_df = history_df[
             history_df["track"] == selected_track
+        ]
+        
+    if filter_same_car_model:
+        history_df = history_df[
+            history_df["car_model"] == selected_car_model
         ]
 
     if filter_same_tire_type:
@@ -721,6 +926,7 @@ def build_history_lookup(
             "Fahrer",
             "Reifensatz",
             "Reifenart",
+            "Auto",
             "Streckentemp °C",
             "Temperaturabweichung °C",
             "Runden Original",
@@ -795,16 +1001,27 @@ with st.expander("Bereinigte Trainingsdatem anzeigen"):
 
 ## Modell trainieren
 try:
-    model, mae = train_model(df)
+    model_bundle, mae = train_model(df)
 except ValueError as error:
     st.error(str(error))
     st.stop()
 
 if mae is not None:
-    st.success(f"Modell trainiert. Testfehler: {mae:.3f} bar")
+    st.success(
+        f"BMW-M4-Basismodell trainiert. Testfehler: {mae:.3f} bar"
+    )
 else:
-    st.success("Modell trainiert. Für einen Testfehler sind zu wenig Daten vorhanden")
+    st.success(
+        "BMW-M4-Basismodell trainiert. "
+        "Für einen Testfehler sind zu wenig BMW-M4-Daten vorhanden."
+    )
 
+with st.expander("Auto-Korrekturen anzeigen"):
+    st.dataframe(
+        model_bundle["car_training_summary"],
+        use_container_width=True,
+        hide_index=True,
+    )
 ## Interface
 
 st.divider()
@@ -822,9 +1039,26 @@ with left:
         track_options,
     )
 
+    available_car_models = sorted(
+        [
+            car_name
+            for car_name in df["car_model"].dropna().unique()
+            if car_name and str(car_name).lower() != "nan"
+        ]
+    )
+
+    if BASE_CAR_MODEL in available_car_models:
+        available_car_models = [
+            BASE_CAR_MODEL
+        ] + [
+            car_name
+            for car_name in available_car_models
+            if car_name != BASE_CAR_MODEL
+        ]
+
     car_model = st.selectbox(
         "Auto",
-        CAR_MODELS,
+        available_car_models,
     )
 
     ambient_temp = st.number_input(
@@ -882,7 +1116,7 @@ with left:
 if calculate:
     st.session_state["recommendation"] = build_recommendation(
         df=df,
-        model=model,
+        model_bundle=model_bundle,
         track=track,
         ambient_temp=ambient_temp,
         track_temp=track_temp,
@@ -958,7 +1192,7 @@ if show_history:
         f"{track_temp - 5:.1f} °C bis {track_temp + 5:.1f} °C"
     )
 
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(3)
 
     with filter_col1:
         filter_same_track = st.checkbox(
@@ -981,15 +1215,23 @@ if show_history:
             ),
         )
 
+    with filter_col4:
+        filter_same_car_model = st.checkbox(
+            "Nur gewähltes Auto",
+            value=True,
+        )
+
     history_df = build_history_lookup(
         df=df,
         reference_track_temp=track_temp,
         selected_track=track,
+        selected_car_model=car_model,
         selected_tire_type=tire_type,
         selected_driver=driver,
         filter_same_track=filter_same_track,
         filter_same_tire_type=filter_same_tire_type,
         filter_same_driver=filter_same_driver,
+        filter_same_car_model=filter_same_car_model,
     )
 
     if history_df.empty:
@@ -1024,10 +1266,10 @@ st.divider()
 st.subheader("Datenqualität")
 
 quality = (
-    df.groupby(["tire_type", "track", "position"])
+    df.groupby(["car_model", "tire_type", "track", "position"])
     .size()
     .reset_index(name="count")
-    .sort_values("count", ascending=False)
+    .sort_values(["car_model", "count",], ascending=[True, False,])
 )
 
 st.dataframe(

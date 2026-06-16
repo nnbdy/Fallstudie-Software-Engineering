@@ -67,11 +67,62 @@ def extract_tire_type(value):
     
     return np.nan
 
+def extract_car_model(raw: pd.DataFrame, sheet_name: str) -> str:
+    car_text = ""
+
+    # Sucht oben im Sheet nach "Auto:" und nimmt den ersten nicht-leeren Wert rechts davon.
+    for row in range(min(5, len(raw.index))):
+        for col in range(len(raw.columns)):
+            if normalize_marker(cell(raw, row, col)).rstrip(":") == "AUTO":
+                for next_col in range(
+                    col + 1,
+                    min(col + 6, len(raw.columns)),
+                ):
+                    car_text = clean_text(
+                        cell(raw, row, next_col)
+                    )
+
+                    if car_text:
+                        break
+
+                break
+
+        if car_text:
+            break
+
+    # Fallback: Falls kein Auto-Feld gefunden wurde, Sheetnamen verwenden.
+    if not car_text:
+        car_text = sheet_name
+
+    normalized = (
+        car_text
+        .upper()
+        .replace(" ", "")
+        .replace("-", "")
+    )
+
+    if "SUPRA" in normalized:
+        return "Supra"
+
+    if (
+        "PORSCHE" in normalized
+        or "922" in normalized
+        or "992" in normalized
+        or "911" in normalized
+    ):
+        return "Porsche"
+
+    if "BMW" in normalized or "M4" in normalized:
+        return "BMW M4"
+
+    return "BMW M4"
+
 def parse_block_sheet(raw: pd.DataFrame, sheet_name: str, source_sheet_order: int,) -> pd.DataFrame:
     rows = []
 
     event = clean_text(cell(raw, 0, 1)) or sheet_name
     track = TRACK_BY_SHEET.get(sheet_name, sheet_name)
+    car_model = extract_car_model(raw, sheet_name)
 
     current_driver = ""
     current_comment = ""
@@ -129,6 +180,7 @@ def parse_block_sheet(raw: pd.DataFrame, sheet_name: str, source_sheet_order: in
                     "track": track,
                     "session": session,
                     "driver": current_driver,
+                    "car_model": car_model,
                     "tire_entry": tire_entry,
                     "tire_type": tire_type,
                     "position": position,
