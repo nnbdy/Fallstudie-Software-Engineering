@@ -941,13 +941,10 @@ def build_history_lookup(
             "Session",
             "Fahrer",
             "Reifensatz",
-            "Reifenart",
             "Auto",
             "Streckentemp °C",
             "Temperaturabweichung °C",
             "Runden Original",
-            "NS-Runden",
-            "GP-Runden",
             *position_columns,
             "Kommentar",
         ]
